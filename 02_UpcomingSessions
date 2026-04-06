@@ -1,0 +1,170 @@
+// ============================================================
+// 02_UpcomingSessions.gs
+// Entry point: buildUpcomingSessions()
+//
+// Layer order:
+//   1. loadSessions()       — Read raw rows from Analytics file
+//   2. filterUpcoming()     — Keep UPCOMING only, drop CANCELLED
+//   3. extractNicknames()   — Parse nickname from "(Nickname)" in Tutor Name
+//   4. deriveDayOfWeek()    — Compute Day_of_Week from Scheduled_Date
+//   5. writeSheet()         — Write Upcoming_Sessions output sheet
+// ============================================================
+
+
+// ── ENTRY POINT ──────────────────────────────────────────────────────────────
+
+function buildUpcomingSessions() {
+  logSection_('buildUpcomingSessions — START');
+
+  // Layer 1
+  const raw = loadSessions_();
+  if (raw.length === 0) { Logger.log('✗ Stopped: no sessions loaded.'); return; }
+
+  // Layer 2
+  const upcoming = filterUpcoming_(raw);
+  if (upcoming.length === 0) { Logger.log('⚠ No UPCOMING sessions found. Sheet will be empty.'); }
+
+  // Layer 3
+  const withNick = extractNicknames_(upcoming);
+
+  // Layer 4
+  const withDay = deriveDayOfWeek_(withNick);
+
+  // Layer 5
+  writeUpcomingSheet_(withDay);
+
+  logSection_('buildUpcomingSessions — DONE');
+  Logger.log(`  Upcoming_Sessions: ${withDay.length} rows written`);
+}
+
+
+// ── LAYER 1: Load raw sessions ────────────────────────────────────────────────
+
+function loadSessions_() {
+  logLayer_(1, 'loadSessions', 'opening Analytics file...');
+  const analyticsFile = openFileByName_(CFG.ANALYTICS_FILE_NAME);
+  const sheet = analyticsFile.getSheetByName(CFG.SESSIONS_SHEET);
+  if (!sheet) throw new Error(`Sheet not found: "${CFG.SESSIONS_SHEET}" in ${CFG.ANALYTICS_FILE_NAME}`);
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) {
+    logLayer_(1, 'loadSessions', 'Sheet has no data rows.');
+    return [];
+  }
+
+  const numRows = lastRow - 1;
+  const numCols = 16; // cols A through P
+  const C = CFG.SESSION_COLS;
+
+  // Read values (for Date objects) and display values (for time strings) separately
+  const values  = sheet.getRange(2, 1, numRows, numCols).getValues();
+  const display = sheet.getRange(2, 1, numRows, numCols).getDisplayValues();
+
+  const rows = values.map((v, i) => ({
+    packageProgram:   display[i][C.packageProgram],
+    tutorName:        display[i][C.tutorName],
+    sessionType:      display[i][C.sessionType],
+    scheduledDate:    v[C.scheduledDate],          // Date object
+    scheduledTime:    display[i][C.scheduledTime], // "HH:MM" display string
+    scheduledEndTime: display[i][C.scheduledEndTime],
+    sessionStatus:    display[i][C.sessionStatus],
+  }));
+
+  logLayer_(1, 'loadSessions', `${rows.length} total rows loaded`);
+  if (rows.length > 0) Logger.log('    Sample: ' + JSON.stringify({
+    tutorName: rows[0].tutorName,
+    status: rows[0].sessionStatus,
+    date: rows[0].scheduledDate,
+    time: rows[0].scheduledTime
+  }));
+  return rows;
+}
+
+function testLoadSessions() {
+  const rows = loadSessions_();
+  Logger.log('testLoadSessions — first 3 rows:');
+  rows.slice(0, 3).forEach(r => Logger.log('  ' + JSON.stringify(r)));
+}
+
+
+// ── LAYER 2: Filter UPCOMING only ─────────────────────────────────────────────
+
+function filterUpcoming_(rows) {
+  logLayer_(2, 'filterUpcoming', 'keeping UPCOMING, dropping CANCELLED...');
+  const upcoming  = rows.filter(r => String(r.sessionStatus).trim().toUpperCase() === 'UPCOMING');
+  const cancelled = rows.length - upcoming.length;
+  logLayer_(2, 'filterUpcoming', `${upcoming.length} UPCOMING kept. ${cancelled} CANCELLED / other dropped.`);
+  return upcoming;
+}
+
+
+// ── LAYER 3: Extract nicknames ────────────────────────────────────────────────
+
+function extractNicknames_(rows) {
+  logLayer_(3, 'extractNicknames', 'parsing nickname from Tutor Name...');
+  let ok = 0, failed = 0;
+  const results = rows.map(r => {
+    const nickname = extractNickname_(r.tutorName);
+    if (!nickname) {
+      Logger.log(`    ⚠ No nickname found in: "${r.tutorName}"`);
+      failed++;
+    } else { ok++; }
+    return { ...r, nickname };
+  });
+  logLayer_(3, 'extractNicknames', `${ok} parsed ok. ${failed} failed (check Tutor Name format).`);
+  return results;
+}
+
+
+// ── LAYER 4: Derive Day of Week ───────────────────────────────────────────────
+
+function deriveDayOfWeek_(rows) {
+  logLayer_(4, 'deriveDayOfWeek', 'computing Day_of_Week from Scheduled_Date...');
+  let ok = 0, failed = 0;
+  const results = rows.map(r => {
+    const day = getDayOfWeek_(r.scheduledDate);
+    if (!day) {
+      Logger.log(`    ⚠ Cannot derive day from: ${r.scheduledDate} (row tutorName: ${r.tutorName})`);
+      failed++;
+    } else { ok++; }
+    return { ...r, dayOfWeek: day };
+  });
+  logLayer_(4, 'deriveDayOfWeek', `${ok} derived ok. ${failed} failed.`);
+  return results;
+}
+
+
+// ── LAYER 5: Write Upcoming_Sessions sheet ────────────────────────────────────
+
+function writeUpcomingSheet_(rows) {
+  logLayer_(5, 'writeUpcomingSheet', 'writing Upcoming_Sessions...');
+  const tz = Session.getScriptTimeZone();
+  const headers = [
+    'Nickname','Package_Program','Session_Type',
+    'Scheduled_Date','Day_of_Week','Block_Start','Block_End','Session_Status'
+  ];
+  const sheetRows = rows.map(r => {
+    const dateStr = (r.scheduledDate instanceof Date && !isNaN(r.scheduledDate))
+      ? Utilities.formatDate(r.scheduledDate, tz, 'yyyy-MM-dd')
+      : String(r.scheduledDate || '');
+    return [
+      r.nickname,
+      r.packageProgram,
+      r.sessionType,
+      dateStr,          // yyyy-MM-dd string for easy comparison
+      r.dayOfWeek,
+      r.scheduledTime,
+      r.scheduledEndTime,
+      r.sessionStatus
+    ];
+  });
+
+  const sheet = getOrCreateSheet_(CFG.UPCOMING_SHEET);
+  sheet.clearContents();
+  sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  if (sheetRows.length > 0) {
+    sheet.getRange(2, 1, sheetRows.length, headers.length).setValues(sheetRows);
+  }
+  logLayer_(5, 'writeUpcomingSheet', `${sheetRows.length} rows written to ${CFG.UPCOMING_SHEET}`);
+}
+
