@@ -1,0 +1,334 @@
+// ============================================================
+// 01_MasterNormalized.gs
+// Entry point: buildMasterNormalized()
+// Also builds Tutor_Profile_Normalized as part of the same run.
+// ============================================================
+
+
+// ── ENTRY POINT ──────────────────────────────────────────────
+
+function buildMasterNormalized() {
+  logSection_('buildMasterNormalized — START');
+
+  const setup = openFileByName_(CFG.SETUP_FILE_NAME);
+
+  // Layer 1
+  const matrixRows = loadMatrix_(setup);
+  if (matrixRows.length === 0) { Logger.log('✗ Stopped: matrix is empty.'); return; }
+
+  // Layer 2
+  const availRaw = loadAvailability_(setup);
+  if (availRaw.length === 0) { Logger.log('✗ Stopped: availability is empty.'); return; }
+
+  // Layer 3 — Tutor Profile is in a SEPARATE file
+  const profileRaw = loadTutorProfile_();
+
+  // Layer 4
+  const availRows = parseAvailability_(availRaw);
+  if (availRows.length === 0) { Logger.log('✗ Stopped: no parseable availability rows.'); return; }
+
+  // Layer 5
+  const { profileMap, profileNormRows } = buildProfileMap_(profileRaw);
+
+  // Layer 6
+  const masterRows = crossJoin_(matrixRows, availRows, profileMap);
+  if (masterRows.length === 0) { Logger.log('✗ Stopped: cross-join produced 0 rows.'); return; }
+
+  // Layer 7
+  writeSheets_(masterRows, profileNormRows);
+
+  logSection_('buildMasterNormalized — DONE');
+  Logger.log(`  Master_Normalized       : ${masterRows.length} rows`);
+  Logger.log(`  Tutor_Profile_Normalized: ${profileNormRows.length} rows`);
+}
+
+
+// ── LAYER 1: Load Subject-Level Matrix ───────────────────────
+
+function loadMatrix_(setupFile) {
+  logLayer_(1, 'loadMatrix', 'reading Subject-Level Matrix...');
+
+  const sheet = setupFile.getSheetByName(CFG.MATRIX_SHEET);
+  if (!sheet) throw new Error(`Sheet not found: "${CFG.MATRIX_SHEET}"`);
+
+  const data    = sheet.getDataRange().getValues();
+  const headers = data[0];
+
+  const teacherCols = [];
+  for (let c = 3; c < headers.length; c++) {
+    const nick = String(headers[c]).trim();
+    if (!nick || CFG.INACTIVE.includes(nick)) continue;
+    teacherCols.push({ index: c, nickname: nick });
+  }
+
+  const rows = [];
+  for (let r = 1; r < data.length; r++) {
+    const row        = data[r];
+    const subject    = String(row[0]).trim();
+    const curriculum = String(row[1]).trim();
+    const level      = String(row[2]).trim();
+    if (!subject || !level) continue;
+
+    for (const { index, nickname } of teacherCols) {
+      if (row[index] === true || String(row[index]).toUpperCase() === 'TRUE') {
+        rows.push({ nickname, subject, curriculum, level });
+      }
+    }
+  }
+
+  logLayer_(1, 'loadMatrix', `${rows.length} combinations. Active teachers: ${teacherCols.length}`);
+  if (rows.length > 0) Logger.log('    Sample: ' + JSON.stringify(rows[0]));
+  return rows;
+}
+
+function testLoadMatrix() {
+  const setup = openFileByName_(CFG.SETUP_FILE_NAME);
+  const rows  = loadMatrix_(setup);
+  Logger.log('testLoadMatrix — first 3 rows:');
+  rows.slice(0, 3).forEach(r => Logger.log('  ' + JSON.stringify(r)));
+}
+
+
+// ── LAYER 2: Load Availability ───────────────────────────────
+
+function loadAvailability_(setupFile) {
+  logLayer_(2, 'loadAvailability', 'reading Availability sheet...');
+
+  const sheet = setupFile.getSheetByName(CFG.AVAIL_SHEET);
+  if (!sheet) throw new Error(`Sheet not found: "${CFG.AVAIL_SHEET}"`);
+
+  const data = sheet.getDataRange().getValues();
+  const rows = [];
+
+  for (let r = 1; r < data.length; r++) {
+    const row      = data[r];
+    const nickname = String(row[CFG.AVAIL_NICK_COL]).trim();
+    if (!nickname) continue;
+
+    for (let d = 0; d < CFG.DAYS.length; d++) {
+      rows.push({
+        nickname,
+        day:      CFG.DAYS[d],
+        timeCell: row[CFG.AVAIL_TIME_COLS[d]],
+        modeCell: row[CFG.AVAIL_MODE_COLS[d]],
+      });
+    }
+  }
+
+  logLayer_(2, 'loadAvailability', `${rows.length} raw day-entries loaded`);
+  return rows;
+}
+
+function testLoadAvailability() {
+  const setup = openFileByName_(CFG.SETUP_FILE_NAME);
+  const rows  = loadAvailability_(setup);
+  Logger.log('testLoadAvailability — first 3 rows:');
+  rows.slice(0, 3).forEach(r => Logger.log('  ' + JSON.stringify(r)));
+}
+
+
+// ── LAYER 3: Load Tutor Profile (separate file) ───────────────
+
+function loadTutorProfile_() {
+  logLayer_(3, 'loadTutorProfile', 'reading Tutor Profile sheet...');
+
+  // Tutor Profile is in its own file, not in Core Setup Data
+  let profileFile;
+  try {
+    profileFile = openFileByName_(CFG.PROFILE_FILE_NAME);
+  } catch (e) {
+    Logger.log(`    ⚠ Tutor Profile file not found: "${CFG.PROFILE_FILE_NAME}". Education filter will be unavailable.`);
+    return [];
+  }
+
+  const sheet = profileFile.getSheetByName(CFG.PROFILE_SHEET);
+  if (!sheet) {
+    Logger.log(`    ⚠ Sheet "${CFG.PROFILE_SHEET}" not found in "${CFG.PROFILE_FILE_NAME}". Education filter will be unavailable.`);
+    return [];
+  }
+
+  const data = sheet.getDataRange().getValues();
+  const rows = [];
+  for (let r = 1; r < data.length; r++) {
+    const row     = data[r];
+    const rawName = String(row[0]).trim();
+    if (!rawName) continue;
+    rows.push({
+      rawName,
+      highSchool: row[1],  // col B — stored but NOT used for country detection
+      bachelor:   row[2],  // col C
+      master:     row[3],  // col D
+      doctoral:   row[4],  // col E
+    });
+  }
+
+  logLayer_(3, 'loadTutorProfile', `${rows.length} teacher profiles loaded`);
+  if (rows.length > 0) Logger.log('    Sample: ' + JSON.stringify({ rawName: rows[0].rawName }));
+  return rows;
+}
+
+function testLoadTutorProfile() {
+  const rows = loadTutorProfile_();
+  Logger.log('testLoadTutorProfile — first 3 rows:');
+  rows.slice(0, 3).forEach(r => Logger.log('  ' + JSON.stringify(r)));
+}
+
+
+// ── LAYER 4: Parse Availability ───────────────────────────────
+
+function parseAvailability_(rawRows) {
+  logLayer_(4, 'parseAvailability', 'normalising time strings...');
+  let parsed = 0, skipped = 0, failed = 0;
+  const results = [];
+
+  for (const { nickname, day, timeCell, modeCell } of rawRows) {
+    if (!timeCell || String(timeCell).trim() === '-') { skipped++; continue; }
+
+    const { onsite, online } = parseMode_(modeCell);
+    const ranges = parseTimeRanges_(timeCell, onsite, online);
+
+    if (ranges.length === 0) {
+      Logger.log(`    ⚠ Parse failed: ${nickname} / ${day} / "${timeCell}"`);
+      failed++;
+      continue;
+    }
+
+    for (const range of ranges) {
+      results.push({ nickname, day, ...range });
+      parsed++;
+    }
+  }
+
+  logLayer_(4, 'parseAvailability', `${parsed} ranges parsed. Skipped: ${skipped}. Failures: ${failed}`);
+  if (results.length > 0) Logger.log('    Sample: ' + JSON.stringify(results[0]));
+  return results;
+}
+
+function testParseAvailability() {
+  const setup  = openFileByName_(CFG.SETUP_FILE_NAME);
+  const raw    = loadAvailability_(setup);
+  const parsed = parseAvailability_(raw);
+  Logger.log('testParseAvailability — first 3 results:');
+  parsed.slice(0, 3).forEach(r => Logger.log('  ' + JSON.stringify(r)));
+}
+
+
+// ── LAYER 5: Build Profile Map ────────────────────────────────
+
+function buildProfileMap_(profileRaw) {
+  logLayer_(5, 'buildProfileMap', 'extracting nicknames and countries...');
+
+  const profileMap      = new Map();
+  const profileNormRows = [];
+  let unmatched = 0;
+
+  for (const p of profileRaw) {
+    const nickname = extractProfileNickname_(p.rawName);
+    if (!nickname) { unmatched++; continue; }
+
+    const bach = parseDegreeCell_(p.bachelor);
+    const mast = parseDegreeCell_(p.master);
+    const doct = parseDegreeCell_(p.doctoral);
+    const hsStr = String(p.highSchool || '').trim();
+
+    // Country detection: Bachelor, Master, Doctoral only (NOT High School)
+    const gradCountries = extractCountries_([
+      String(p.bachelor || ''),
+      String(p.master   || ''),
+      String(p.doctoral || '')
+    ]);
+
+    profileMap.set(nickname, { gradCountries });
+
+    profileNormRows.push([
+      nickname, hsStr,
+      bach.degree, bach.university,
+      mast.degree, mast.university,
+      doct.degree, doct.university,
+      gradCountries
+    ]);
+  }
+
+  const withCountries = profileNormRows.filter(r => r[8]).length;
+  logLayer_(5, 'buildProfileMap', `${profileMap.size} profiles mapped. With countries: ${withCountries}. Unparseable: ${unmatched}`);
+  return { profileMap, profileNormRows };
+}
+
+
+// ── LAYER 6: Cross-join Matrix × Availability ─────────────────
+
+function crossJoin_(matrixRows, availRows, profileMap) {
+  logLayer_(6, 'crossJoin', 'joining matrix with availability...');
+
+  const availByNick = new Map();
+  for (const a of availRows) {
+    if (!availByNick.has(a.nickname)) availByNick.set(a.nickname, []);
+    availByNick.get(a.nickname).push(a);
+  }
+
+  const results = [];
+  const noAvail = new Set();
+
+  for (const m of matrixRows) {
+    const avails = availByNick.get(m.nickname);
+    if (!avails || avails.length === 0) { noAvail.add(m.nickname); continue; }
+
+    const profile       = profileMap.get(m.nickname);
+    const gradCountries = profile ? profile.gradCountries : '';
+
+    for (const a of avails) {
+      results.push([
+        m.nickname,     // A: Nickname
+        a.day,          // B: Day
+        a.start,        // C: Avail_Start
+        a.end,          // D: Avail_End
+        a.onsite,       // E: Onsite
+        a.online,       // F: Online
+        m.subject,      // G: Subject
+        m.curriculum,   // H: Curriculum
+        m.level,        // I: Level
+        gradCountries   // J: Grad_Countries
+      ]);
+    }
+  }
+
+  if (noAvail.size > 0) Logger.log(`    ⚠ No availability for: ${[...noAvail].join(', ')}`);
+  logLayer_(6, 'crossJoin', `${results.length} rows produced`);
+  return results;
+}
+
+
+// ── LAYER 7: Write output sheets ──────────────────────────────
+
+function writeSheets_(masterRows, profileNormRows) {
+  logLayer_(7, 'writeSheets', 'writing output sheets...');
+
+  const masterHeaders = [
+    'Nickname','Day','Avail_Start','Avail_End',
+    'Onsite','Online','Subject','Curriculum','Level','Grad_Countries'
+  ];
+  const masterSheet = getOrCreateSheet_(CFG.MASTER_SHEET);
+  masterSheet.clearContents();
+  masterSheet.getRange(1, 1, 1, masterHeaders.length).setValues([masterHeaders]);
+  if (masterRows.length > 0) {
+    // Set time columns (C=3, D=4) as plain text to prevent Sheets auto-converting
+    masterSheet.getRange(2, 3, masterRows.length, 2).setNumberFormat('@');
+    masterSheet.getRange(2, 1, masterRows.length, masterHeaders.length).setValues(masterRows);
+  }
+  logLayer_(7, 'writeSheets', `Master_Normalized: ${masterRows.length} rows written`);
+
+  if (profileNormRows.length > 0) {
+    const profileHeaders = [
+      'Nickname','High_School',
+      'Bachelor_Degree','Bachelor_University',
+      'Master_Degree','Master_University',
+      'Doctoral_Degree','Doctoral_University',
+      'Grad_Countries'
+    ];
+    const profileSheet = getOrCreateSheet_(CFG.PROFILE_NORM_SHEET);
+    profileSheet.clearContents();
+    profileSheet.getRange(1, 1, 1, profileHeaders.length).setValues([profileHeaders]);
+    profileSheet.getRange(2, 1, profileNormRows.length, profileHeaders.length).setValues(profileNormRows);
+    logLayer_(7, 'writeSheets', `Tutor_Profile_Normalized: ${profileNormRows.length} rows written`);
+  }
+}
