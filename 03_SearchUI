@@ -1,0 +1,593 @@
+// ============================================================
+//  03_SearchUI.gs — BeGifted Teacher Search
+//  Search_Slot + Search_Teacher sheets
+//  Run buildSearchSheets() once, then use the menu to search.
+// ============================================================
+
+const C = {
+  teal:'#1A7A6E', tealLight:'#E8F5F3', tealMid:'#B2DDD8',
+  white:'#FFFFFF', labelBg:'#F3F4F6', amber:'#FEF3C7',
+  border:'#D1D5DB',
+};
+
+// ── Menu ─────────────────────────────────────────────────────
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('🔍 BeGifted Search')
+    .addItem('Setup Search Sheets (run once)', 'buildSearchSheets')
+    .addSeparator()
+    .addItem('▶ Run Slot Search',    'runSlotSearch')
+    .addItem('▶ Run Teacher Search', 'runTeacherSearch')
+    .addSeparator()
+    .addItem('Rebuild Master Data',       'buildMasterNormalized')
+    .addItem('Refresh Upcoming Sessions', 'buildUpcomingSessions')
+    .addToUi();
+}
+
+// ── Setup ─────────────────────────────────────────────────────
+function buildSearchSheets() {
+  Logger.log('=== buildSearchSheets() START ===');
+  buildSlotSheet();
+  buildTeacherSheet();
+  Logger.log('=== buildSearchSheets() DONE ===');
+  SpreadsheetApp.getUi().alert('✅ Search sheets created!\n\nNext: Rebuild Master Data, then Refresh Upcoming Sessions.');
+}
+
+// ── Search_Slot Sheet ─────────────────────────────────────────
+function buildSlotSheet() {
+  const ss  = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName('Search_Slot');
+  if (sheet) ss.deleteSheet(sheet);
+  sheet = ss.insertSheet('Search_Slot');
+
+  [1,4,24,24,140,90,90,90,80,80,180,180,180,180].forEach((w,i) => sheet.setColumnWidth(i+1, w));
+
+  // Title
+  sheet.getRange('B1:N1').merge()
+    .setValue('🔍  Slot Search — Find Available Teachers')
+    .setBackground(C.teal).setFontColor(C.white).setFontWeight('bold')
+    .setFontSize(13).setVerticalAlignment('middle').setHorizontalAlignment('left');
+  sheet.setRowHeight(1, 38);
+
+  // Subtitle
+  sheet.getRange('B2:N2').merge()
+    .setValue('กรอก criteria ด้านล่าง → เมนู 🔍 BeGifted Search → ▶ Run Slot Search  |  ⚠ หากต้องการตัด session ที่จองแล้วออก ให้ระบุ Specific Date ด้วย')
+    .setFontColor('#6B7280').setFontSize(10).setFontStyle('italic');
+  sheet.setRowHeight(2, 20);
+
+  // Section label
+  sheet.getRange('B3').setValue('SEARCH CRITERIA').setFontColor(C.teal).setFontWeight('bold').setFontSize(9);
+
+  // Input rows
+  // Row 4:Subject 5:Level 6:Day 7:StartTime 8:EndTime 9:Mode 10:Date 11:GradFrom
+  const inputs = [
+    { row:4,  label:'Subject',              note:'Required' },
+    { row:5,  label:'Level',                note:'Required' },
+    { row:6,  label:'Day',                  note:'Required' },
+    { row:7,  label:'Requested Start Time', note:'Required — HH:MM e.g. 14:00' },
+    { row:8,  label:'Requested End Time',   note:'Required — HH:MM e.g. 15:30\n\nครูต้องว่างตั้งแต่ Start Time จนถึง End Time นี้' },
+    { row:9,  label:'Mode',                 note:'Required' },
+    { row:10, label:'Specific Date',        note:'Optional — format: 2026-04-11\n\nเนื่องจาก upcoming sessions ของแต่ละครูไม่ได้เกิดซ้ำทุกสัปดาห์ จึงต้องระบุวันที่จริงเพื่อตรวจสอบว่าครูมีคลาสอยู่แล้วหรือไม่' },
+    { row:11, label:'Graduated From',       note:'Optional — filter by country' },
+  ];
+
+  for (const inp of inputs) {
+    sheet.setRowHeight(inp.row, 28);
+    sheet.getRange(inp.row, 2).setValue(inp.label)
+      .setBackground(C.labelBg).setFontWeight('bold').setFontSize(11).setVerticalAlignment('middle');
+    sheet.getRange(inp.row, 3).setBackground(C.white).setVerticalAlignment('middle')
+      .setFontSize(11).setNote(inp.note);
+    sheet.getRange(inp.row, 2, 1, 2).setBorder(true,true,true,true,false,false, C.border, SpreadsheetApp.BorderStyle.SOLID);
+  }
+
+  // Hint text for date
+  sheet.getRange(10, 3).setValue('ตัวอย่าง: 2026-04-11').setFontColor('#9CA3AF').setFontStyle('italic').setFontSize(10);
+
+  setSlotDropdowns(sheet);
+
+  // Results area
+  sheet.getRange('B13:N13').merge().setValue('RESULTS')
+    .setBackground(C.teal).setFontColor(C.white).setFontWeight('bold').setFontSize(9);
+  sheet.setRowHeight(13, 22);
+
+  const rh = ['Nickname','Day','Avail Start','Avail End','Onsite','Online','Subject','Curriculum','Level','Grad Countries'];
+  sheet.getRange(14, 5, 1, rh.length).setValues([rh])
+    .setBackground(C.tealMid).setFontWeight('bold').setFontSize(10)
+    .setVerticalAlignment('middle').setHorizontalAlignment('center');
+  sheet.setRowHeight(14, 24);
+
+  sheet.getRange(15, 5, 1, rh.length).merge()
+    .setValue('Run a search to see results here.')
+    .setFontColor('#9CA3AF').setFontStyle('italic').setFontSize(10);
+
+  Logger.log('  ✓ Search_Slot sheet built');
+}
+
+function setSlotDropdowns(sheet) {
+  const ss     = SpreadsheetApp.getActiveSpreadsheet();
+  const master = ss.getSheetByName(CFG.MASTER_SHEET);
+
+  if (master) {
+    const data = master.getDataRange().getValues().slice(1);
+    setDropdown(sheet, 4, 3, [...new Set(data.map(r=>r[6]).filter(Boolean))].sort());
+    setDropdown(sheet, 5, 3, [...new Set(data.map(r=>r[8]).filter(Boolean))].sort());
+  } else {
+    sheet.getRange(4,3).setValue('⚠ Run Rebuild Master Data first');
+    sheet.getRange(5,3).setValue('⚠ Run Rebuild Master Data first');
+  }
+
+  setDropdown(sheet, 6, 3, ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']);
+  setDropdown(sheet, 9, 3, ['Any','Onsite','Online']);
+  sheet.getRange(9,3).setValue('Any');
+  setDropdown(sheet, 11, 3, ['Any','UK','USA','Australia','Thailand','Other']);
+  sheet.getRange(11,3).setValue('Any');
+
+  // Plain text for time and date cells
+  sheet.getRange(7,3).setNumberFormat('@');
+  sheet.getRange(8,3).setNumberFormat('@');
+  sheet.getRange(10,3).setNumberFormat('@');
+}
+
+// ── Search_Teacher Sheet ──────────────────────────────────────
+function buildTeacherSheet() {
+  const ss  = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName('Search_Teacher');
+  if (sheet) ss.deleteSheet(sheet);
+  sheet = ss.insertSheet('Search_Teacher');
+
+  [1,24,180,260,24,160,200,200,100,80,80].forEach((w,i) => sheet.setColumnWidth(i+1, w));
+
+  sheet.getRange('B1:J1').merge().setValue('👤  Teacher Search — Availability & Profile')
+    .setBackground(C.teal).setFontColor(C.white).setFontWeight('bold')
+    .setFontSize(13).setVerticalAlignment('middle').setHorizontalAlignment('left');
+  sheet.setRowHeight(1, 38);
+
+  sheet.getRange('B2:J2').merge()
+    .setValue('Select a teacher → 🔍 BeGifted Search → ▶ Run Teacher Search')
+    .setFontColor('#6B7280').setFontSize(10).setFontStyle('italic');
+  sheet.setRowHeight(2, 20);
+
+  sheet.getRange('B3').setValue('SEARCH CRITERIA').setFontColor(C.teal).setFontWeight('bold').setFontSize(9);
+
+  const inputs = [
+    { row:4, label:'Teacher Nickname', note:'Required' },
+    { row:5, label:'Mode',             note:'Optional — Any / Onsite / Online' },
+    { row:6, label:'Show blocks from', note:'Optional — yyyy-MM-dd' },
+  ];
+
+  for (const inp of inputs) {
+    sheet.setRowHeight(inp.row, 28);
+    sheet.getRange(inp.row,2).setValue(inp.label)
+      .setBackground(C.labelBg).setFontWeight('bold').setFontSize(11).setVerticalAlignment('middle');
+    sheet.getRange(inp.row,3).setBackground(C.white).setVerticalAlignment('middle')
+      .setFontSize(11).setNote(inp.note);
+    sheet.getRange(inp.row,2,1,2).setBorder(true,true,true,true,false,false, C.border, SpreadsheetApp.BorderStyle.SOLID);
+  }
+
+  setTeacherDropdowns(sheet);
+
+  sheet.getRange('B8:J8').merge().setValue('RESULTS')
+    .setBackground(C.teal).setFontColor(C.white).setFontWeight('bold').setFontSize(9);
+  sheet.setRowHeight(8, 22);
+  sheet.getRange(9,2,1,8).merge()
+    .setValue('Run a search to see results here.')
+    .setFontColor('#9CA3AF').setFontStyle('italic').setFontSize(10);
+
+  Logger.log('  ✓ Search_Teacher sheet built');
+}
+
+function setTeacherDropdowns(sheet) {
+  const ss     = SpreadsheetApp.getActiveSpreadsheet();
+  const master = ss.getSheetByName(CFG.MASTER_SHEET);
+
+  if (master) {
+    const data = master.getDataRange().getValues().slice(1);
+    setDropdown(sheet, 4, 3, [...new Set(data.map(r=>r[0]).filter(Boolean))].sort());
+  } else {
+    sheet.getRange(4,3).setValue('⚠ Run Rebuild Master Data first');
+  }
+  setDropdown(sheet, 5, 3, ['Any','Onsite','Online']);
+  sheet.getRange(5,3).setValue('Any');
+  sheet.getRange(6,3).setNumberFormat('@');
+}
+
+function setDropdown(sheet, row, col, items) {
+  const rule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(items, true).setAllowInvalid(false).build();
+  sheet.getRange(row, col).setDataValidation(rule);
+}
+
+// ── Time Helpers ──────────────────────────────────────────────
+function formatDate(d) {
+  if (!(d instanceof Date)) return String(d||'').trim();
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+
+function extractTimeHHMM(val) {
+  if (!val) return '';
+  if (val instanceof Date) {
+    return String(val.getHours()).padStart(2,'0')+':'+String(val.getMinutes()).padStart(2,'0');
+  }
+  const str = String(val).trim();
+  const m = str.match(/(\d{1,2}):(\d{2})/);
+  if (m) return m[1].padStart(2,'0')+':'+m[2];
+  return str;
+}
+
+function timeToMinutes(t) {
+  if (!t || typeof t !== 'string') return null;
+  const m = t.trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  return parseInt(m[1],10)*60 + parseInt(m[2],10);
+}
+
+// ── SLOT SEARCH ───────────────────────────────────────────────
+function runSlotSearch() {
+  const ss    = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName('Search_Slot');
+  if (!sheet) { SpreadsheetApp.getUi().alert('Search_Slot not found. Run Setup first.'); return; }
+
+  const subject     = String(sheet.getRange(4,3).getValue()||'').trim();
+  const level       = String(sheet.getRange(5,3).getValue()||'').trim();
+  const day         = String(sheet.getRange(6,3).getValue()||'').trim();
+  const startRaw    = extractTimeHHMM(sheet.getRange(7,3).getValue());
+  const endRaw      = extractTimeHHMM(sheet.getRange(8,3).getValue());
+  const mode        = String(sheet.getRange(9,3).getValue()||'Any').trim();
+  const dateRaw     = String(sheet.getRange(10,3).getValue()||'').trim();
+  const gradFilter  = String(sheet.getRange(11,3).getValue()||'Any').trim();
+
+  if (!subject || !level || !day || !startRaw || !endRaw) {
+    writeSlotError(sheet, '⚠ กรุณากรอก Subject, Level, Day, Start Time และ End Time ให้ครบ'); return;
+  }
+  if (!/^\d{1,2}:\d{2}$/.test(startRaw)) {
+    writeSlotError(sheet, '⚠ Start Time ไม่ถูกต้อง ใช้รูปแบบ HH:MM เช่น 14:00'); return;
+  }
+  if (!/^\d{1,2}:\d{2}$/.test(endRaw)) {
+    writeSlotError(sheet, '⚠ End Time ไม่ถูกต้อง ใช้รูปแบบ HH:MM เช่น 15:30'); return;
+  }
+
+  Logger.log('runSlotSearch: '+subject+' | '+level+' | '+day+' | '+startRaw+'–'+endRaw+' | '+mode+' | date='+dateRaw+' | grad='+gradFilter);
+
+  const master = ss.getSheetByName(CFG.MASTER_SHEET);
+  if (!master) { writeSlotError(sheet, '⚠ Master_Normalized not found. Rebuild first.'); return; }
+
+  const masterData = master.getDataRange().getValues().slice(1);
+  const reqStart   = timeToMinutes(startRaw);
+  const reqEnd     = timeToMinutes(endRaw);
+  let rows         = masterData;
+
+  // Step 1: Subject
+  rows = rows.filter(r => r[6] === subject);
+  Logger.log('  After Subject: '+rows.length);
+
+  // Step 2: Level
+  rows = rows.filter(r => r[8] === level);
+  Logger.log('  After Level: '+rows.length);
+
+  // Step 3: Day
+  rows = rows.filter(r => r[1] === day);
+  Logger.log('  After Day: '+rows.length);
+
+  // Step 4: Time — session must fully fit within availability window
+  rows = rows.filter(r => {
+    const s = timeToMinutes(extractTimeHHMM(r[2]));
+    const e = timeToMinutes(extractTimeHHMM(r[3]));
+    return s !== null && e !== null && reqStart >= s && reqEnd <= e;
+  });
+  Logger.log('  After Time ('+startRaw+'–'+endRaw+'): '+rows.length);
+
+  // Step 5: Mode
+  if (mode === 'Onsite') rows = rows.filter(r => r[4] === true);
+  if (mode === 'Online') rows = rows.filter(r => r[5] === true);
+  Logger.log('  After Mode: '+rows.length);
+
+  // Step 6: Date block
+  if (dateRaw) {
+    const blocked = getBlockedNicknames(dateRaw, reqStart, reqEnd);
+    rows = rows.filter(r => !blocked.has(r[0]));
+    Logger.log('  After Date block: '+rows.length);
+  }
+
+  // Step 7: Grad filter
+  if (gradFilter && gradFilter !== 'Any') {
+    rows = rows.filter(r => String(r[9]).includes(gradFilter));
+    Logger.log('  After Grad: '+rows.length);
+  }
+
+  // Deduplicate
+  const seen = new Set();
+  const deduped = rows.filter(r => {
+    const k = r[0]+'|'+r[2]+'|'+r[3];
+    if (seen.has(k)) return false;
+    seen.add(k); return true;
+  });
+
+  if (deduped.length === 0) {
+    const suggestions = suggestAvailableSlots(masterData, {subject, level, day, mode, gradFilter});
+    writeSlotNoResults(sheet, suggestions, {subject, level, day, time:startRaw, timeEnd:endRaw});
+  } else {
+    writeSlotResults(sheet, deduped);
+  }
+}
+
+// Suggest slots ignoring time filter
+function suggestAvailableSlots(masterData, p) {
+  let rows = masterData;
+  rows = rows.filter(r => r[6] === p.subject);
+  rows = rows.filter(r => r[8] === p.level);
+  rows = rows.filter(r => r[1] === p.day);
+  if (p.mode === 'Onsite') rows = rows.filter(r => r[4] === true);
+  if (p.mode === 'Online') rows = rows.filter(r => r[5] === true);
+  if (p.gradFilter && p.gradFilter !== 'Any') rows = rows.filter(r => String(r[9]).includes(p.gradFilter));
+  const seen = new Set();
+  return rows.filter(r => {
+    const k = r[0]+'|'+r[2]+'|'+r[3];
+    if (seen.has(k)) return false;
+    seen.add(k); return true;
+  });
+}
+
+function getBlockedNicknames(date, reqStart, reqEnd) {
+  Logger.log('getBlockedNicknames: date='+date+' start='+reqStart+' end='+reqEnd);
+  const ss       = SpreadsheetApp.getActiveSpreadsheet();
+  const upcoming = ss.getSheetByName(CFG.UPCOMING_SHEET);
+  if (!upcoming) { Logger.log('  No Upcoming_Sessions sheet'); return new Set(); }
+  const blocked = new Set();
+  const rows    = upcoming.getDataRange().getValues().slice(1);
+  Logger.log('  Upcoming rows: '+rows.length);
+  let matchCount = 0;
+  for (const r of rows) {
+    const rowDate = r[3] instanceof Date ? formatDate(r[3]) : String(r[3]).trim();
+    if (rowDate !== date) continue;
+    matchCount++;
+    const bs = timeToMinutes(extractTimeHHMM(r[5]));
+    const be = timeToMinutes(extractTimeHHMM(r[6]));
+    Logger.log('  Match: nick='+r[0]+' bs='+bs+' be='+be);
+    // Block if requested session overlaps with existing block
+    if (bs !== null && be !== null && reqStart < be && reqEnd > bs) {
+      blocked.add(r[0]);
+      Logger.log('  → BLOCKED: '+r[0]);
+    }
+  }
+  Logger.log('  Matching date rows: '+matchCount+'. Blocked: '+[...blocked].join(', '));
+  return blocked;
+}
+
+function writeSlotNoResults(sheet, suggestions, params) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow >= 15) sheet.getRange(15, 5, lastRow-14, 10).breakApart().clearContent().clearFormat();
+
+  const headers = ['Nickname','Day','Avail Start','Avail End','Onsite','Online','Subject','Curriculum','Level','Grad Countries'];
+  sheet.getRange(14, 5, 1, headers.length).setValues([headers])
+    .setBackground('#B2DDD8').setFontWeight('bold').setFontSize(10).setHorizontalAlignment('center');
+
+  const ts = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'dd MMM yyyy HH:mm');
+  sheet.getRange('B13:N13').breakApart().merge()
+    .setValue('RESULTS — 0 teachers found for '+params.time+'–'+params.timeEnd+'   ('+ts+')')
+    .setBackground('#B91C1C').setFontColor('#FFFFFF').setFontWeight('bold').setFontSize(9);
+
+  if (suggestions.length === 0) {
+    sheet.getRange(15, 5, 1, headers.length).breakApart().merge()
+      .setValue('ไม่พบครูที่สอน '+params.subject+' ระดับ '+params.level+' ในวัน'+params.day+' เลย')
+      .setFontColor('#9CA3AF').setFontStyle('italic').setFontSize(10);
+    return;
+  }
+
+  sheet.getRange(15, 5, 1, headers.length).breakApart().merge()
+    .setValue('💡 ไม่พบครูที่ว่างช่วง '+params.time+'–'+params.timeEnd+' — แต่พบ '+suggestions.length+' slot ที่ว่างในวัน'+params.day+' นี้:')
+    .setBackground('#FEF3C7').setFontColor('#92400E').setFontWeight('bold').setFontSize(10);
+  sheet.setRowHeight(15, 26);
+
+  const data = suggestions.map(r => [r[0],r[1],extractTimeHHMM(r[2]),extractTimeHHMM(r[3]),r[4]?'✓':'–',r[5]?'✓':'–',r[6],r[7],r[8],r[9]||'–']);
+  sheet.getRange(16, 5, data.length, headers.length).setValues(data).setFontSize(11).setVerticalAlignment('middle');
+  for (let i=0; i<data.length; i++) sheet.getRange(16+i,5,1,headers.length).setBackground(i%2===0?'#FFFFFF':'#FFFBEB');
+  sheet.getRange(16,5,data.length,1).setFontWeight('bold').setFontColor(C.teal);
+  sheet.getRange(16,9,data.length,2).setHorizontalAlignment('center').setFontColor(C.teal);
+  for (let i=16; i<16+data.length; i++) sheet.setRowHeight(i, 26);
+  Logger.log('writeSlotNoResults: '+suggestions.length+' suggestions written');
+}
+
+function writeSlotResults(sheet, rows) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow >= 15) sheet.getRange(15, 5, lastRow-14, 10).breakApart().clearContent().clearFormat();
+
+  const headers = ['Nickname','Day','Avail Start','Avail End','Onsite','Online','Subject','Curriculum','Level','Grad Countries'];
+  sheet.getRange(14, 5, 1, headers.length).setValues([headers])
+    .setBackground(C.tealMid).setFontWeight('bold').setFontSize(10).setHorizontalAlignment('center');
+
+  const ts = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'dd MMM yyyy HH:mm');
+  sheet.getRange('B13:N13').breakApart().merge()
+    .setValue('RESULTS — '+rows.length+' teacher'+(rows.length!==1?'s':'')+' found   ('+ts+')')
+    .setBackground(C.teal).setFontColor(C.white).setFontWeight('bold').setFontSize(9);
+
+  const data = rows.map(r => [r[0],r[1],extractTimeHHMM(r[2]),extractTimeHHMM(r[3]),r[4]?'✓':'–',r[5]?'✓':'–',r[6],r[7],r[8],r[9]||'–']);
+  sheet.getRange(15, 5, data.length, headers.length).setValues(data).setFontSize(11).setVerticalAlignment('middle');
+  for (let i=0; i<data.length; i++) sheet.getRange(15+i,5,1,headers.length).setBackground(i%2===0?C.white:'#F9FAFB');
+  sheet.getRange(15,5,data.length,1).setFontWeight('bold').setFontColor(C.teal);
+  sheet.getRange(15,9,data.length,2).setHorizontalAlignment('center').setFontColor(C.teal);
+  for (let i=15; i<15+data.length; i++) sheet.setRowHeight(i, 26);
+  Logger.log('writeSlotResults: '+data.length+' rows written');
+}
+
+function writeSlotError(sheet, msg) {
+  sheet.getRange('B13:N13').breakApart().merge().setValue('RESULTS — Error')
+    .setBackground('#B91C1C').setFontColor(C.white).setFontWeight('bold').setFontSize(9);
+  const lastRow = sheet.getLastRow();
+  if (lastRow >= 15) sheet.getRange(15,5,lastRow-14,10).breakApart().clearContent().clearFormat();
+  sheet.getRange(15,5,1,10).breakApart().merge().setValue(msg).setFontColor('#B91C1C').setFontSize(11);
+}
+
+// ── TEACHER SEARCH ────────────────────────────────────────────
+function runTeacherSearch() {
+  const ss    = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName('Search_Teacher');
+  if (!sheet) { SpreadsheetApp.getUi().alert('Search_Teacher not found. Run Setup first.'); return; }
+
+  const nickname = String(sheet.getRange(4,3).getValue()||'').trim();
+  const mode     = String(sheet.getRange(5,3).getValue()||'Any').trim();
+  const fromDate = String(sheet.getRange(6,3).getValue()||'').trim();
+
+  if (!nickname) { writeTeacherError(sheet, '⚠ Please select a teacher nickname.'); return; }
+
+  Logger.log('runTeacherSearch: '+nickname+' | mode='+mode+' | from='+fromDate);
+
+  const master = ss.getSheetByName(CFG.MASTER_SHEET);
+  if (!master) { writeTeacherError(sheet, '⚠ Master_Normalized not found. Rebuild first.'); return; }
+
+  const masterData = master.getDataRange().getValues().slice(1);
+
+  // Step 1: rows for this teacher
+  let rows = masterData.filter(r => r[0] === nickname);
+  Logger.log('  Step 1 — rows: '+rows.length);
+  if (rows.length === 0) { writeTeacherError(sheet, '⚠ No data for "'+nickname+'". Check nickname.'); return; }
+
+  // Step 2: Mode filter
+  if (mode === 'Onsite') rows = rows.filter(r => r[4] === true);
+  if (mode === 'Online') rows = rows.filter(r => r[5] === true);
+  Logger.log('  Step 2 — After mode: '+rows.length);
+
+  // Step 3: Unique availability windows
+  const seenAvail = new Set();
+  const availRows = [];
+  for (const r of rows) {
+    const k = r[1]+'|'+r[2]+'|'+r[3];
+    if (seenAvail.has(k)) continue;
+    seenAvail.add(k);
+    availRows.push({day:r[1], start:r[2], end:r[3], onsite:r[4], online:r[5]});
+  }
+  Logger.log('  Step 3 — Unique avail windows: '+availRows.length);
+
+  // Step 4: Upcoming blocks
+  const upcoming = ss.getSheetByName(CFG.UPCOMING_SHEET);
+  let blockRows = [];
+  if (upcoming) {
+    const upData = upcoming.getDataRange().getValues().slice(1);
+    blockRows = upData
+      .filter(r => {
+        if (r[0] !== nickname) return false;
+        if (!fromDate) return true;
+        const rd = r[3] instanceof Date ? formatDate(r[3]) : String(r[3]).trim();
+        return rd >= fromDate;
+      })
+      .map(r => ({
+        date:      r[3] instanceof Date ? formatDate(r[3]) : String(r[3]).trim(),
+        dayOfWeek: r[4],
+        start:     extractTimeHHMM(r[5]),
+        end:       extractTimeHHMM(r[6]),
+        pkg:       r[1],
+        type:      r[2]
+      }));
+    Logger.log('  Step 4 — Upcoming blocks: '+blockRows.length);
+  }
+
+  // Step 5: Education profile
+  let profile = null;
+  const profileSheet = ss.getSheetByName(CFG.PROFILE_NORM_SHEET);
+  if (profileSheet) {
+    const pRow = profileSheet.getDataRange().getValues().slice(1).find(r => r[0] === nickname);
+    if (pRow) profile = pRow;
+    Logger.log('  Step 5 — Profile: '+(profile?'found':'not found'));
+  }
+
+  const subjects = [...new Set(masterData.filter(r=>r[0]===nickname).map(r=>r[6]).filter(Boolean))].sort();
+  writeTeacherResults(sheet, nickname, availRows, blockRows, profile, subjects);
+}
+
+function writeTeacherResults(sheet, nickname, availRows, blockRows, profile, subjects) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow >= 9) sheet.getRange(9,2,lastRow-8,9).breakApart().clearContent().clearFormat();
+
+  const ts = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'dd MMM yyyy HH:mm');
+  sheet.getRange('B8:J8').breakApart().merge()
+    .setValue('RESULTS — '+nickname+'   ('+ts+')')
+    .setBackground(C.teal).setFontColor(C.white).setFontWeight('bold').setFontSize(9);
+
+  let r = 9;
+
+  // Section A: Education Profile
+  sheet.getRange(r,2,1,8).merge().setValue('🎓  EDUCATION PROFILE')
+    .setBackground(C.tealLight).setFontWeight('bold').setFontSize(10).setFontColor(C.teal); r++;
+
+  if (profile) {
+    const prows = [
+      ["Bachelor's", profile[2]?(profile[2]+(profile[3]?'  —  '+profile[3]:'')):'–'],
+      ["Master's",   profile[4]?(profile[4]+(profile[5]?'  —  '+profile[5]:'')):'–'],
+      ['Doctoral',   profile[6]?(profile[6]+(profile[7]?'  —  '+profile[7]:'')):'–'],
+      ['Graduated from', profile[8]||'–'],
+    ];
+    for (const [label, value] of prows) {
+      sheet.getRange(r,2).setValue(label).setFontWeight('bold').setFontSize(10).setBackground('#F9FAFB');
+      sheet.getRange(r,3,1,7).merge().setValue(value).setFontSize(10).setWrap(true);
+      sheet.setRowHeight(r, 24); r++;
+    }
+  } else {
+    sheet.getRange(r,2,1,8).merge().setValue('No profile on record.').setFontColor('#9CA3AF').setFontStyle('italic').setFontSize(10); r++;
+  }
+
+  sheet.getRange(r,2).setValue('Subjects').setFontWeight('bold').setFontSize(10).setBackground('#F9FAFB');
+  sheet.getRange(r,3,1,7).merge().setValue(subjects.join(', ')||'–').setFontSize(10);
+  sheet.setRowHeight(r, 24); r+=2;
+
+  // Section B: Weekly Availability
+  sheet.getRange(r,2,1,8).merge().setValue('📅  WEEKLY AVAILABILITY')
+    .setBackground(C.tealLight).setFontWeight('bold').setFontSize(10).setFontColor(C.teal); r++;
+  sheet.getRange(r,2,1,5).setValues([['Day','Avail Start','Avail End','Onsite','Online']])
+    .setBackground(C.tealMid).setFontWeight('bold').setFontSize(10).setHorizontalAlignment('center'); r++;
+
+  if (availRows.length === 0) {
+    sheet.getRange(r,2,1,5).merge().setValue('No availability data found.').setFontColor('#9CA3AF').setFontStyle('italic').setFontSize(10); r++;
+  } else {
+    const DAY_ORDER = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
+    const byDay = {};
+    for (const a of availRows) { if (!byDay[a.day]) byDay[a.day]=[]; byDay[a.day].push(a); }
+    let stripe = 0;
+    for (const day of DAY_ORDER) {
+      if (!byDay[day]) continue;
+      for (const a of byDay[day]) {
+        const bg = stripe%2===0?C.white:'#F9FAFB';
+        sheet.getRange(r,2,1,5).setValues([[a.day,extractTimeHHMM(a.start),extractTimeHHMM(a.end),a.onsite?'✓':'–',a.online?'✓':'–']])
+          .setBackground(bg).setFontSize(10).setHorizontalAlignment('center');
+        sheet.getRange(r,2).setFontWeight('bold').setHorizontalAlignment('left');
+        sheet.setRowHeight(r,24); r++; stripe++;
+      }
+    }
+  }
+  r++;
+
+  // Section C: Upcoming Blocked Sessions
+  sheet.getRange(r,2,1,8).merge().setValue('🔒  UPCOMING BOOKED SESSIONS')
+    .setBackground(C.amber).setFontWeight('bold').setFontSize(10).setFontColor('#92400E'); r++;
+  sheet.getRange(r,2,1,6).setValues([['Date','Day','Start','End','Package / Program','Session Type']])
+    .setBackground('#FDE68A').setFontWeight('bold').setFontSize(10).setHorizontalAlignment('center'); r++;
+
+  if (blockRows.length === 0) {
+    sheet.getRange(r,2,1,6).merge().setValue('No upcoming sessions found.').setFontColor('#9CA3AF').setFontStyle('italic').setFontSize(10); r++;
+  } else {
+    for (let i=0; i<blockRows.length; i++) {
+      const b=blockRows[i], bg=i%2===0?C.white:'#FFFBEB';
+      sheet.getRange(r,2,1,6).setValues([[b.date,b.dayOfWeek,b.start,b.end,b.pkg,b.type]])
+        .setBackground(bg).setFontSize(10).setHorizontalAlignment('center');
+      sheet.getRange(r,2).setFontWeight('bold').setFontColor('#92400E').setHorizontalAlignment('left');
+      sheet.setRowHeight(r,24); r++;
+    }
+  }
+  Logger.log('writeTeacherResults: written to row '+r);
+}
+
+function writeTeacherError(sheet, msg) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow >= 9) sheet.getRange(9,2,lastRow-8,9).breakApart().clearContent().clearFormat();
+  sheet.getRange('B8:J8').breakApart().merge().setValue('RESULTS — Error')
+    .setBackground('#B91C1C').setFontColor(C.white).setFontWeight('bold').setFontSize(9);
+  sheet.getRange(9,2,1,8).breakApart().merge().setValue(msg).setFontColor('#B91C1C').setFontSize(11);
+}
+
+// ── Refresh dropdowns ─────────────────────────────────────────
+function refreshSearchDropdowns() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const s  = ss.getSheetByName('Search_Slot');
+  const t  = ss.getSheetByName('Search_Teacher');
+  if (s) setSlotDropdowns(s);
+  if (t) setTeacherDropdowns(t);
+  Logger.log('refreshSearchDropdowns() done');
+}
